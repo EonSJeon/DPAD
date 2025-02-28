@@ -8,6 +8,21 @@ Shanechi Lab, University of Southern California
 """The model used in DPAD"""
 """For mathematical description see DPADModelDoc.md"""
 
+from ArgsClasses import (
+    DistributionType,
+    LayerConfig,
+    DPADConfig,
+    Activation,
+    KernelInitializer,
+    SignalType,
+    OptimizerName,
+    OptimizerConfig,
+)
+
+
+import re, copy
+from typing import Tuple, Optional
+
 import copy
 import io
 import logging
@@ -72,7 +87,7 @@ logger = logging.getLogger(__name__)
 INPUT_MSG = "Adding separate input signals is not supported in this version, but stay tuned for future DPAD versions that support it."
 STEPS_AHEAD_MSG = "Setting steps ahead is not supported in this version, but stay tuned for future DPAD versions that wil support it."
 
-
+# No configuration resolution needed
 def shift_ms_to_1s_series(
     Y, steps_ahead, missing_marker=None, time_first=True, verbose=True
 ):
@@ -131,8 +146,8 @@ def shift_ms_to_1s_series(
         Y_shifted.append(pred_shifted)
     return tuple(Y_shifted)
 
-
-def getLossLogStr(trueVals, predVals, steps, sigType, lossFuncs):
+# Finish Tokenization
+def getLossLogStr(trueVals, predVals, steps, sigType: SignalType, lossFuncs):
     if not isinstance(trueVals, (list, tuple)):
         trueVals = [trueVals]
     if not isinstance(predVals, (list, tuple)):
@@ -145,23 +160,18 @@ def getLossLogStr(trueVals, predVals, steps, sigType, lossFuncs):
         predVal = predVals[ind % len(predVals)]
         step = steps[ind % len(steps)]
         lossVals = [
-            (
-                lossFunc(trueVal, predVal.T)
-                if sigType in ["cont", "count_process"]
-                else lossFunc(trueVal, predVal.transpose([1, 0, 2]))
-            )
+            lossFunc(trueVal, predVal.T)
+            if sigType in {SignalType.CONTINUOUS, SignalType.COUNT_PROCESS}
+            else lossFunc(trueVal, predVal.transpose([1, 0, 2]))
             for lossFunc in lossFuncs
         ]
         strs.append(
-            f"{step}-step: "
-            + ", ".join(
-                [
-                    f"{lossFunc.__name__}={lossVal:.3g}"
-                    for lossFunc, lossVal in zip(lossFuncs, lossVals)
-                ]
-            )
+            f"{step}-step: " +
+            ", ".join(f"{lossFunc.__name__}={lossVal:.3g}"
+                      for lossFunc, lossVal in zip(lossFuncs, lossVals))
         )
     return "\n".join(strs)
+
 
 
 def DPADModelSetTrainableParameters(
@@ -225,396 +235,221 @@ class DPADModel(PredictorModel):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+    
+    # Partially resolved
     @staticmethod
-    def prepare_args(methodCode):
-        """Parses a method code and preprares the arguments for the DPADModel constructor.
-
-        Args:
-            methodCode (string): DPAD method code string. For example can be "DPAD_uAKCzCy2HL128U"
-                for a fully nonlinear model with 2 hidden layers of 128 units for each model parameter.
-
-        Returns:
-            kwargs: dict of arguments for the DPADModel constructor.
-        """
-        A1_args = {}
-        K1_args = {}
-        Cy1_args = {}
-        Cz1_args = {}
-        A2_args = {}
-        K2_args = {}
-        Cy2_args = {}
-        Cz2_args = {}
+    def prepare_args(methodCode) -> DPADConfig:
+        config = DPADConfig()
+        
+        # --- Nonlinearity / Hidden Layer settings ---
         if "HL" in methodCode or "NonLin" in methodCode:
-            regex = (
-                r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)(\d+)HL(\d+)U"  # Cz1HL64U
-            )
-            if len(re.findall(regex, methodCode)) > 0:
-                matches = re.finditer(regex, methodCode)
-                for matchNum, match in enumerate(matches, start=1):
-                    var_names, hidden_layers, hidden_units = match.groups()
+            regex = r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)(\d+)HL(\d+)U"
+            matches = re.findall(regex, methodCode)
+            if matches:
+                var_names, hidden_layers, hidden_units = matches[-1]
                 hidden_layers = int(hidden_layers)
                 hidden_units = int(hidden_units)
             else:
-                regex = r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)NonLin"  # CzNonLin
-                matches = re.finditer(regex, methodCode)
-                for matchNum, match in enumerate(matches, start=1):
-                    var_names = match.groups()
-                hidden_layers = 3  # Default
-                hidden_units = 64  # Default
-            activation = "relu"
+                regex = r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)NonLin"
+                matches = re.findall(regex, methodCode)
+                var_names = matches[-1] if matches else ""
+                hidden_layers = 3   # default
+                hidden_units = 64   # default
+            # Use the tokenized activation value
+            activation = Activation.RELU.value
             NL_args = {
                 "use_bias": True,
                 "units": [hidden_units] * hidden_layers,
                 "activation": activation,
             }
-            if (
-                var_names == ""
-                or "A1" in var_names
-                or ("A" in var_names and "A2" not in var_names)
-            ):
-                A1_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "A2" in var_names
-                or ("A" in var_names and "A1" not in var_names)
-            ):
-                A2_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "K1" in var_names
-                or ("K" in var_names and "K2" not in var_names)
-            ):
-                K1_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "K2" in var_names
-                or ("K" in var_names and "K1" not in var_names)
-            ):
-                K2_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "Cy1" in var_names
-                or ("Cy" in var_names and "Cy2" not in var_names)
-            ):
-                Cy1_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "Cy2" in var_names
-                or ("Cy" in var_names and "Cy1" not in var_names)
-            ):
-                Cy2_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "Cz1" in var_names
-                or ("Cz" in var_names and "Cz2" not in var_names)
-            ):
-                Cz1_args = copy.copy(NL_args)
-            if (
-                var_names == ""
-                or "Cz2" in var_names
-                or ("Cz" in var_names and "Cz1" not in var_names)
-            ):
-                Cz2_args = copy.copy(NL_args)
-        if (
-            "OGInit" in methodCode
-        ):  # Use initializers similar to the default keras LSTM initializers
-            A1_args["kernel_initializer"] = "orthogonal"
-            K1_args["kernel_initializer"] = "glorot_uniform"
-            Cy1_args["kernel_initializer"] = "glorot_uniform"
-            Cy1_args["kernel_initializer"] = "glorot_uniform"
-            A2_args["kernel_initializer"] = "orthogonal"
-            K2_args["kernel_initializer"] = "glorot_uniform"
-            Cy2_args["kernel_initializer"] = "glorot_uniform"
-            Cy2_args["kernel_initializer"] = "glorot_uniform"
-        if "AKerIn0" in methodCode:  # Initialize A with zeros
-            A1_args["kernel_initializer"] = "zeros"
-            A2_args["kernel_initializer"] = "zeros"
-        if "uAK" in methodCode:  # Unify A and K
-            K1_args["unifiedAK"] = True
-            K2_args["unifiedAK"] = True
-        if "RGL" in methodCode:  # Regularize
-            regex = r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)RGLB?(\d+)?(Drop)?"  # _ARGL2_L1e5
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                var_names, norm_num, dropout = match.groups()
-            # Param value
-            lambdaVal = 0.01  # Default: 'l': 0.01
-            regex = r"L(\d+)e([-+])?(\d+)"  # L1e-2
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                m, sgn, power = match.groups()
-                if sgn is not None and sgn == "-":
-                    power = -float(power)
-                lambdaVal = float(m) * 10 ** float(power)
+            # Assign NL_args to layer configurations based on var_names.
+            if var_names == "" or "A1" in var_names or ("A" in var_names and "A2" not in var_names):
+                config.A1 = LayerConfig(**NL_args)
+            if var_names == "" or "A2" in var_names or ("A" in var_names and "A1" not in var_names):
+                config.A2 = LayerConfig(**NL_args)
+            if var_names == "" or "K1" in var_names or ("K" in var_names and "K2" not in var_names):
+                config.K1 = LayerConfig(**NL_args)
+            if var_names == "" or "K2" in var_names or ("K" in var_names and "K1" not in var_names):
+                config.K2 = LayerConfig(**NL_args)
+            if var_names == "" or "Cy1" in var_names or ("Cy" in var_names and "Cy2" not in var_names):
+                config.Cy1 = LayerConfig(**NL_args)
+            if var_names == "" or "Cy2" in var_names or ("Cy" in var_names and "Cy1" not in var_names):
+                config.Cy2 = LayerConfig(**NL_args)
+            if var_names == "" or "Cz1" in var_names or ("Cz" in var_names and "Cz2" not in var_names):
+                config.Cz1 = LayerConfig(**NL_args)
+            if var_names == "" or "Cz2" in var_names or ("Cz" in var_names and "Cz1" not in var_names):
+                config.Cz2 = LayerConfig(**NL_args)
+        
+        # --- Initializer settings ---
+        if "OGInit" in methodCode:
+            for layer in [config.A1, config.A2]:
+                if layer is not None:
+                    layer.kernel_initializer = KernelInitializer.ORTHOGONAL.value
+            for layer in [config.K1, config.Cy1, config.K2, config.Cy2]:
+                if layer is not None:
+                    layer.kernel_initializer = KernelInitializer.GLOROT_UNIFORM.value
+        if "AKerIn0" in methodCode:
+            for layer in [config.A1, config.A2]:
+                if layer is not None:
+                    layer.kernel_initializer = KernelInitializer.ZEROS.value
+        if "uAK" in methodCode:
+            if config.K1 is not None:
+                config.K1.unifiedAK = True
+            if config.K2 is not None:
+                config.K2.unifiedAK = True
+        
+        # --- Regularization ---
+        if "RGL" in methodCode:
+            rgl_regex = r"([A|K|Cy|Cz|A1|K1|Cy1|Cz1|A2|K2|Cy2|Cz2|]*)RGLB?(\d+)?(Drop)?"
+            rgl_matches = list(re.finditer(rgl_regex, methodCode))
+            var_names_reg = ""
+            dropout = None
+            norm_num = None
+            if rgl_matches:
+                m = rgl_matches[-1]
+                var_names_reg, norm_num, dropout = m.groups()
+            lambdaVal = 0.01  # default
+            l_regex = r"L(\d+)e([-+])?(\d+)"
+            l_matches = list(re.finditer(l_regex, methodCode))
+            if l_matches:
+                m, sgn, power = l_matches[-1].groups()
+                power = -float(power) if sgn == "-" else float(power)
+                lambdaVal = float(m) * (10 ** power)
             RGL_args = {}
-            if dropout is not None and dropout != "":  # Add dropout regularization
-                RGL_args.update({"dropout_rate": lambdaVal})
-            if norm_num is not None and norm_num != "":  # Add L1 or L2 regularization
+            if dropout is not None and dropout != "":
+                RGL_args["dropout_rate"] = lambdaVal
+            if norm_num is not None and norm_num != "":
                 if norm_num in ["1", "2"]:
-                    regularizer_name = "l{}".format(norm_num)
+                    regularizer_name = "l" + norm_num
                 else:
-                    raise (Exception("Unsupported method code: {}".format(methodCode)))
-                regularizer_args = {"l": lambdaVal}  # Default: 'l': 0.01
-                RGL_args.update(
-                    {
-                        "kernel_regularizer_name": regularizer_name,
-                        "kernel_regularizer_args": regularizer_args,
-                    }
-                )
-                if "RGLB" in methodCode:  # Also regularize biases
-                    # Reference for why usually biases don't need regularization:
-                    # http://neuralnetworksanddeeplearning.com/chap3.html
-                    RGL_args.update(
-                        {
-                            "bias_regularizer_name": regularizer_name,
-                            "bias_regularizer_args": regularizer_args,
-                        }
-                    )
-            if (
-                var_names == ""
-                or "A1" in var_names
-                or ("A" in var_names and "A2" not in var_names)
-            ):
-                A1_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "A2" in var_names
-                or ("A" in var_names and "A1" not in var_names)
-            ):
-                A2_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "K1" in var_names
-                or ("K" in var_names and "K2" not in var_names)
-            ):
-                K1_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "K2" in var_names
-                or ("K" in var_names and "K1" not in var_names)
-            ):
-                K2_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "Cy1" in var_names
-                or ("Cy" in var_names and "Cy2" not in var_names)
-            ):
-                Cy1_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "Cy2" in var_names
-                or ("Cy" in var_names and "Cy1" not in var_names)
-            ):
-                Cy2_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "Cz1" in var_names
-                or ("Cz" in var_names and "Cz2" not in var_names)
-            ):
-                Cz1_args.update(copy.deepcopy(RGL_args))
-            if (
-                var_names == ""
-                or "Cz2" in var_names
-                or ("Cz" in var_names and "Cz1" not in var_names)
-            ):
-                Cz2_args.update(copy.deepcopy(RGL_args))
-
-        if "dummyA" in methodCode:  # Dummy A
-            A1_args["dummy"] = True
-            A2_args["dummy"] = True
-
-        init_method = None
-        if "init" in methodCode:  # Initialize
-            regex = r"init(.+)"  #
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                initMethod = match.groups()
-            if len(initMethod) > 0:
-                init_method = initMethod[0]
-
-        if "RTR" in methodCode:  # Retry initialization
-            regex = r"RTR(\d+)"  # RTR2
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                init_attempts = match.groups()
-            init_attempts = int(init_attempts[0])
+                    raise Exception("Unsupported method code: " + methodCode)
+                regularizer_args = {"l": lambdaVal}
+                RGL_args.update({
+                    "kernel_regularizer_name": regularizer_name,
+                    "kernel_regularizer_args": regularizer_args,
+                })
+                if "RGLB" in methodCode:
+                    RGL_args.update({
+                        "bias_regularizer_name": regularizer_name,
+                        "bias_regularizer_args": regularizer_args,
+                    })
+            # Update every layer that is not None.
+            for layer in [config.A1, config.A2, config.K1, config.K2,
+                        config.Cy1, config.Cy2, config.Cz1, config.Cz2]:
+                if layer is not None:
+                    for key, value in RGL_args.items():
+                        setattr(layer, key, copy.deepcopy(value))
+        
+        if "dummyA" in methodCode:
+            if config.A1 is not None:
+                config.A1.dummy = True
+            if config.A2 is not None:
+                config.A2.dummy = True
+        
+        # --- Custom initialization method ---
+        init_match = re.search(r"init(.+)", methodCode)
+        if init_match:
+            config.init_method = init_match.group(1)
+        
+        # --- Retry initialization ---
+        rtr_match = re.search(r"RTR(\d+)", methodCode)
+        config.init_attempts = int(rtr_match.group(1)) if rtr_match else 1
+        
+        # --- Early stopping ---
+        ers_match = re.search(r"ErSV?(\d+)", methodCode)
+        if ers_match:
+            config.early_stopping_patience = int(ers_match.group(1))
+            config.early_stopping_measure = "val_loss" if "ErSV" in ers_match.group(0) else "loss"
         else:
-            init_attempts = 1
+            config.early_stopping_patience = 3
+            config.early_stopping_measure = "loss"
+        
+        # --- Minimum epochs ---
+        min_ep_match = re.search(r"MinEp(\d+)", methodCode)
+        config.start_from_epoch_rnn = int(min_ep_match.group(1)) if min_ep_match else 0
+        
+        # --- Batch size ---
+        btc_match = re.search(r"BtcS(\d+)", methodCode)
+        config.batch_size = int(btc_match.group(1)) if btc_match else None
+        
+        # --- Optimizer and scheduler ---
+        optimizer_infos, _ = parseMethodCodeArgOptimizer(methodCode)
+        if optimizer_infos:
+            opt_info = optimizer_infos[0]
+            config.optimizer.optimizer_name = opt_info.get("optimizer_name", "Adam")
+            config.optimizer.optimizer_args = opt_info.get("optimizer_args")
+            config.optimizer.lr_scheduler_name = opt_info.get("scheduler_name")
+            config.optimizer.lr_scheduler_args = opt_info.get("scheduler_args")
+        
+        # --- Steps-ahead configuration ---
+        steps, steps_loss_weights, _ = parseMethodCodeArgStepsAhead(methodCode)
+        config.steps_ahead = steps
+        config.steps_ahead_loss_weights = steps_loss_weights
+        
+        # --- Architecture flags ---
+        config.model1_Cy_Full = any(flag in methodCode for flag in ["FCy", "FCyCz", "FCzCy"])
+        config.model2_Cz_Full = any(flag in methodCode for flag in ["FCz", "FCyCz", "FCzCy"])
+        config.linear_cell = "LinCell" in methodCode
+        config.LSTM_cell = "LSTM" in methodCode
+        config.bidirectional = ("xSmth" in methodCode) or ("bidir" in methodCode)
+        config.allow_nonzero_Cz2 = "Cz20" not in methodCode
+        config.has_Dyz = "Dyz" in methodCode
+        config.skip_Cy = "skipCy" in methodCode
+        config.zscore_inputs = "nzs" not in methodCode
+        
+        return config
 
-        if "ErS" in methodCode:  # Early stopping
-            regex = r"ErSV?(\d+)"  # ErS64
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                early_stopping_patience = match.groups()
-                ErS_str = methodCode[match.span()[0] : match.span()[1]]
-            early_stopping_patience = int(early_stopping_patience[0])
-        else:
-            early_stopping_patience = 3
-            ErS_str = ""
-        early_stopping_measure = "val_loss" if "ErSV" in ErS_str else "loss"
 
-        if "MinEp" in methodCode:  # Minimum epochs
-            regex = r"MinEp(\d+)"  # MinEp150
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                start_from_epoch_rnn = match.groups()
-            start_from_epoch_rnn = int(start_from_epoch_rnn[0])
-        else:
-            start_from_epoch_rnn = 0
-
-        if "BtcS" in methodCode:  # The batch_size
-            regex = r"BtcS(\d+)"  # BtcS1
-            matches = re.finditer(regex, methodCode)
-            for matchNum, match in enumerate(matches, start=1):
-                batch_size = match.groups()
-            batch_size = int(batch_size[0])
-        else:
-            batch_size = None
-
-        lr_scheduler_name = None
-        lr_scheduler_args = None
-
-        optimizer_name = "Adam"  # default
-        optimizer_args = None
-        optimizer_infos, matches = parseMethodCodeArgOptimizer(methodCode)
-        if len(optimizer_infos) > 0:
-            optimizer_info = optimizer_infos[0]
-            if "optimizer_name" in optimizer_info:
-                optimizer_name = optimizer_info["optimizer_name"]
-            if "optimizer_args" in optimizer_info:
-                optimizer_args = optimizer_info["optimizer_args"]
-            if "scheduler_name" in optimizer_info:
-                lr_scheduler_name = optimizer_info["scheduler_name"]
-            if "scheduler_args" in optimizer_info:
-                lr_scheduler_args = optimizer_info["scheduler_args"]
-
-        steps_ahead, steps_ahead_loss_weights, matches = parseMethodCodeArgStepsAhead(
-            methodCode
-        )
-
-        model1_Cy_Full = (
-            "FCy" in methodCode or "FCyCz" in methodCode or "FCzCy" in methodCode
-        )
-        model2_Cz_Full = (
-            "FCz" in methodCode or "FCyCz" in methodCode or "FCzCy" in methodCode
-        )
-        linear_cell = "LinCell" in methodCode
-        LSTM_cell = "LSTM" in methodCode
-        bidirectional = "xSmth" in methodCode or "bidir" in methodCode
-        allow_nonzero_Cz2 = "Cz20" not in methodCode
-        has_Dyz = "Dyz" in methodCode
-        skip_Cy = "skipCy" in methodCode
-        zscore_inputs = "nzs" not in methodCode
-
-        kwargs = {
-            "A1_args": A1_args,
-            "K1_args": K1_args,
-            "Cy1_args": Cy1_args,
-            "Cz1_args": Cz1_args,
-            "A2_args": A2_args,
-            "K2_args": K2_args,
-            "Cy2_args": Cy2_args,
-            "Cz2_args": Cz2_args,
-            "init_method": init_method,
-            "init_attempts": init_attempts,
-            "batch_size": batch_size,
-            "early_stopping_patience": early_stopping_patience,
-            "early_stopping_measure": early_stopping_measure,
-            "start_from_epoch_rnn": start_from_epoch_rnn,
-            "model1_Cy_Full": model1_Cy_Full,
-            "model2_Cz_Full": model2_Cz_Full,
-            "linear_cell": linear_cell,
-            "LSTM_cell": LSTM_cell,
-            "bidirectional": bidirectional,
-            "allow_nonzero_Cz2": allow_nonzero_Cz2,
-            "has_Dyz": has_Dyz,
-            "skip_Cy": skip_Cy,
-            "steps_ahead": steps_ahead,  # List of ints (None take as [1]), indicating the number of steps ahead to generate from the model (used to construct training loss and predictions
-            "steps_ahead_loss_weights": steps_ahead_loss_weights,  # Weight of each step ahead prediction in loss. If None, will give all steps ahead equal weight of 1.
-            "zscore_inputs": zscore_inputs,
-            "optimizer_name": optimizer_name,
-            "optimizer_args": optimizer_args,
-            "lr_scheduler_name": lr_scheduler_name,
-            "lr_scheduler_args": lr_scheduler_args,
-        }
-        if A1_args == A2_args:
-            kwargs["A_args"] = A1_args
-            del kwargs["A1_args"], kwargs["A2_args"]
-        if K1_args == K2_args:
-            kwargs["K_args"] = K1_args
-            del kwargs["K1_args"], kwargs["K2_args"]
-        if Cy1_args == Cy2_args:
-            kwargs["Cy_args"] = Cy1_args
-            del kwargs["Cy1_args"], kwargs["Cy2_args"]
-        if Cz1_args == Cz2_args:
-            kwargs["Cz_args"] = Cz1_args
-            del kwargs["Cz1_args"], kwargs["Cz2_args"]
-        return kwargs
-
+    # Resolved
     def add_default_param_args(
-        self,
-        A1_args={},
-        K1_args={},
-        Cy1_args={},
-        Cz1_args={},
-        A2_args={},
-        K2_args={},
-        Cy2_args={},
-        Cz2_args={},
-        yDist=None,
-        zDist=None,
+        A1: LayerConfig = None,
+        K1: LayerConfig = None,
+        Cy1: LayerConfig = None,
+        Cz1: LayerConfig = None,
+        A2: LayerConfig = None,
+        K2: LayerConfig = None,
+        Cy2: LayerConfig = None,
+        Cz2: LayerConfig = None,
+        yDist: DistributionType = None,
+        zDist: DistributionType = None,
     ):
-        LinArgs = {
-            "units": [],
-            "use_bias": False,
-            "activation": "linear",
-            "output_activation": "linear",
-        }
-        for f, v in LinArgs.items():
-            if f not in A1_args:
-                A1_args[f] = v
-            if f not in K1_args:
-                K1_args[f] = v
-            if f not in Cy1_args:
-                Cy1_args[f] = v
-            if f not in Cz1_args:
-                Cz1_args[f] = v
-            if f not in A2_args:
-                A2_args[f] = v
-            if f not in K2_args:
-                K2_args[f] = v
-            if f not in Cy2_args:
-                Cy2_args[f] = v
-            if f not in Cz2_args:
-                Cz2_args[f] = v
+        """Ensures all LayerConfig instances have the required default values."""
 
-        if yDist == "poisson":
-            Cy1_args["out_dist"] = "poisson"
-            Cy1_args["output_activation"] = "exponential"
-            Cy2_args["out_dist"] = "poisson"
-            Cy2_args["output_activation"] = "exponential"
-
-        if zDist == "poisson":
-            Cz1_args["out_dist"] = "poisson"
-            Cz1_args["output_activation"] = "exponential"
-            Cz2_args["out_dist"] = "poisson"
-            Cz2_args["output_activation"] = "exponential"
-
-        if "unifiedAK" not in K1_args:
-            K1_args["unifiedAK"] = False
-        if "unifiedAK" not in K2_args:
-            K2_args["unifiedAK"] = False
-        return (
-            A1_args,
-            K1_args,
-            Cy1_args,
-            Cz1_args,
-            A2_args,
-            K2_args,
-            Cy2_args,
-            Cz2_args,
+        # Default linear layer arguments
+        lin_args = LayerConfig(
+            use_bias=False,
+            units=None,  # Explicitly setting to None instead of an empty list
+            activation=Activation.LINEAR,
+            output_activation=Activation.LINEAR
         )
+        
+        # Assign missing default values
+        A1 = A1 or lin_args
+        K1 = K1 or lin_args
+        Cy1 = Cy1 or lin_args
+        Cz1 = Cz1 or lin_args
+        A2 = A2 or lin_args
+        K2 = K2 or lin_args
+        Cy2 = Cy2 or lin_args
+        Cz2 = Cz2 or lin_args
 
+        # Set distribution types and activations for output layers
+        if yDist == DistributionType.POISSON:
+            Cy1.out_dist = Cy2.out_dist = DistributionType.POISSON.value
+            Cy1.output_activation = Cy2.output_activation = Activation.EXPONENTIAL.value
+
+        if zDist == DistributionType.POISSON:
+            Cz1.out_dist = Cz2.out_dist = DistributionType.POISSON.value
+            Cz1.output_activation = Cz2.output_activation = Activation.EXPONENTIAL.value
+
+        # Ensure unifiedAK is explicitly set
+        K1.unifiedAK = K1.unifiedAK if K1.unifiedAK is not None else False
+        K2.unifiedAK = K2.unifiedAK if K2.unifiedAK is not None else False
+
+        return A1, K1, Cy1, Cz1, A2, K2, Cy2, Cz2
+
+
+    # No configuration resolution needed
     def get_model_steps_ahead(self, steps_ahead=None, steps_ahead_loss_weights=None):
         if steps_ahead is not None:
             maxStepsAhead = np.max(steps_ahead)
@@ -649,52 +484,59 @@ class DPADModel(PredictorModel):
             model1_orig_step_inds,
         )
 
-    def prep_observation_for_training(self, Y, YType):
-        """Prepares the output distribution depending of signal type, a version of the output loss function,
-        and appropriated shaped ground truth signal for logging
+
+    # Resolved
+    def prep_observation_for_training(self, Y, YType: SignalType):
+        """Prepares the output distribution depending on signal type, assigns an appropriate loss function,
+        and formats the ground truth signal for logging.
 
         Args:
-            Y ([type]): [description]
-            YType ([type]): [description]
+            Y (np.ndarray or None): The observation data.
+            YType (SignalType): The type of signal.
 
         Returns:
-            [type]: [description]
+            tuple: (YLossFuncs, YTrue, yDist)
+                - YLossFuncs (list): Loss functions applicable to the signal type.
+                - YTrue (np.ndarray or None): Formatted ground truth values for logging.
+                - yDist (DistributionType or None): The probability distribution type.
         """
         if Y is not None:
             isOkY = getIsOk(Y, self.missing_marker)
         else:
-            YTrue = Y
-        if YType == "cat":
+            YTrue = Y  # Maintain None if Y is None
+
+        if YType == SignalType.CATEGORICAL:
             yDist = None
-            YLossFuncs = [
-                masked_CategoricalCrossentropy(self.missing_marker),
-            ]
+            YLossFuncs = [masked_CategoricalCrossentropy(self.missing_marker)]
+
             if Y is not None:
                 YClasses = np.unique(Y[:, np.all(isOkY, axis=0)])
-                YTrue = np.ones((Y.shape[1], Y.shape[0], len(YClasses)), dtype=int) * (
-                    int(self.missing_marker) if self.missing_marker is not None else -1
+                YTrue = np.full(
+                    (Y.shape[1], Y.shape[0], len(YClasses)),
+                    fill_value=int(self.missing_marker) if self.missing_marker is not None else -1,
+                    dtype=int
                 )
                 for yi in range(Y.shape[0]):
-                    YTrueThis = get_one_hot(
-                        Y[yi, isOkY[yi, :]][:, np.newaxis], len(YClasses)
-                    )
+                    YTrueThis = get_one_hot(Y[yi, isOkY[yi, :]][:, np.newaxis], len(YClasses))
                     YTrue[isOkY[yi, :], yi, :] = YTrueThis[:, 0, :]
-        elif YType == "count_process":
-            yDist = "poisson"
+
+        elif YType == SignalType.COUNT_PROCESS:
+            yDist = DistributionType.POISSON.value
             YLossFuncs = [masked_PoissonLL_loss(self.missing_marker)]
-            if Y is not None:
-                YTrue = Y.T
-        else:
+            YTrue = Y.T if Y is not None else None
+
+        else:  # Continuous case
             yDist = None
             YLossFuncs = [
                 masked_mse(self.missing_marker),
                 masked_R2(self.missing_marker),
                 masked_CC(self.missing_marker),
             ]
-            if Y is not None:
-                YTrue = Y.T
+            YTrue = Y.T if Y is not None else None
+
         return YLossFuncs, YTrue, yDist
 
+    # No resolution is needed.
     def get_input_prep_map(
         self,
         Y,
@@ -720,6 +562,7 @@ class DPADModel(PredictorModel):
             # YThis = thisMap.apply(YThis)
         return map
 
+    # No resolution is needed.
     def setTrainableParameters(self, base=None, fw=None, initial_state=None):
         DPADModelSetTrainableParameters(
             base=base,
@@ -2267,6 +2110,7 @@ class DPADModel(PredictorModel):
             self.ZCov = np.cov(Z, rowvar=True)
         set_global_tf_eagerly_flag(eagerly_flag_backup)
 
+    # No Resolution needed
     def keep_steps_and_cat_for_reg_model(
         self, input_list_shifted, is_fw=False, return_keeper_func=False
     ):
@@ -2330,7 +2174,8 @@ class DPADModel(PredictorModel):
                     "Fitting model1_Cy and model2_Cz with different step ahead weights is not supported yet!"
                 )
             )
-
+        
+        # No Resolution needed
         def keep_w_items(x):
             # Keeps only elements of the list for which the corresponding steps_ahead loss weight is not zero
             if x is None:
@@ -2361,7 +2206,8 @@ class DPADModel(PredictorModel):
             return out
         else:
             return out, keep_w_items
-
+    
+    # No Resolution needed
     def prepare_inputs_to_model1_Cy(self, Y, U, allXp1_steps, steps_ahead):
         """Returns shifted inputs and repeated outputs needed to train model1_Cy
 
@@ -2386,7 +2232,8 @@ class DPADModel(PredictorModel):
         )
         YRep = [Y for _ in range(len(steps_ahead))]
         return allXp1U_steps, allXp1U_steps_Shifted, YRep
-
+    
+    # No Resolution needed
     def prepare_inputs_to_model1_Cy_fw(self, allXp1_steps, steps_ahead):
         """Returns shifted inputs and repeated outputs needed to train model1_Cy
 
@@ -2402,6 +2249,7 @@ class DPADModel(PredictorModel):
         )
         return allXp1_steps_Shifted
 
+    # No Resolution needed
     def prepare_inputs_to_model2_Cz(
         self, Y, Z, U, allX_steps, allXp2_steps, allZp_steps, steps_ahead
     ):
@@ -2448,6 +2296,7 @@ class DPADModel(PredictorModel):
         ZRep = [Z for _ in range(len(steps_ahead))]
         return allXpForCz, priorForCzFit, ZRep
 
+    # No Resolution needed
     def prepare_inputs_to_model2_Cz_fw(
         self, allX_steps, allXp2_steps, allZp_steps, steps_ahead
     ):
@@ -2481,6 +2330,7 @@ class DPADModel(PredictorModel):
 
         return allXpForCz_fw, priorForCzFit_fw
 
+    # No Resolution needed
     def prepare_inputs_to_model1(self, Y, U):
         """Returns concatenated Y and U inputs required to train RNN model1
 
@@ -2503,6 +2353,7 @@ class DPADModel(PredictorModel):
             FT_in = U
         return YU, FT_in
 
+    # No Resolution needed
     def prepare_inputs_to_model2(self, model1_Cy, Y, U, allXp1_steps, allXp1U_steps):
         """Returns concatenated Y, U, X's from stage 1, forward prediction inputs n1_in, and prior predictions required to train RNN model2
 
@@ -3580,7 +3431,8 @@ class DPADModel(PredictorModel):
         setattr(s, "info", {})
         s.info["logs"] = self.logs if hasattr(self, "logs") else {}
         return s
-
+    
+    # Saketh
     def setToLSSM(
         self,
         sys,
@@ -4010,6 +3862,7 @@ class DPADModel(PredictorModel):
 
         return E
 
+    # Saketh
     def predict(self, Y, U=None, x0=None):
         """Runs prediction for a given input data
 
